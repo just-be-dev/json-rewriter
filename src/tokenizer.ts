@@ -10,7 +10,22 @@ export type JSONToken =
   | { type: "boolean"; value: boolean }
   | { type: "null" };
 
+const START_OBJECT_TOKEN: JSONToken = { type: "startObject" };
+const END_OBJECT_TOKEN: JSONToken = { type: "endObject" };
+const START_ARRAY_TOKEN: JSONToken = { type: "startArray" };
+const END_ARRAY_TOKEN: JSONToken = { type: "endArray" };
+const COLON_TOKEN: JSONToken = { type: "colon" };
+const COMMA_TOKEN: JSONToken = { type: "comma" };
+const TRUE_TOKEN: JSONToken = { type: "boolean", value: true };
+const FALSE_TOKEN: JSONToken = { type: "boolean", value: false };
+const NULL_TOKEN: JSONToken = { type: "null" };
+const SKIPPED_STRING_TOKEN: JSONToken = { type: "string", value: "", output: '""' };
+const SKIPPED_NUMBER_TOKEN: JSONToken = { type: "number", raw: "0", value: 0 };
+const NUMBER_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
 export class JSONTokenizer {
+  preserveTokenValues = true;
+
   private buffer = "";
   private position = 0;
 
@@ -31,7 +46,7 @@ export class JSONTokenizer {
         break;
       }
 
-      const token = this.readToken(final);
+      const token = this.readToken(final, this.preserveTokenValues);
       if (!token) {
         break;
       }
@@ -53,47 +68,47 @@ export class JSONTokenizer {
     }
   }
 
-  private readToken(final: boolean): JSONToken | undefined {
+  private readToken(final: boolean, preserveValue: boolean): JSONToken | undefined {
     const char = this.buffer[this.position];
 
     if (char === "{") {
       this.position += 1;
-      return { type: "startObject" };
+      return START_OBJECT_TOKEN;
     }
     if (char === "}") {
       this.position += 1;
-      return { type: "endObject" };
+      return END_OBJECT_TOKEN;
     }
     if (char === "[") {
       this.position += 1;
-      return { type: "startArray" };
+      return START_ARRAY_TOKEN;
     }
     if (char === "]") {
       this.position += 1;
-      return { type: "endArray" };
+      return END_ARRAY_TOKEN;
     }
     if (char === ":") {
       this.position += 1;
-      return { type: "colon" };
+      return COLON_TOKEN;
     }
     if (char === ",") {
       this.position += 1;
-      return { type: "comma" };
+      return COMMA_TOKEN;
     }
     if (char === '"') {
-      return this.readString(final);
+      return this.readString(final, preserveValue);
     }
     if (char === "t" || char === "f" || char === "n") {
       return this.readLiteral(final);
     }
     if (char === "-" || isDigit(char)) {
-      return this.readNumber(final);
+      return this.readNumber(final, preserveValue);
     }
 
     throw new SyntaxError(`Unexpected JSON character: ${char}`);
   }
 
-  private readString(final: boolean): JSONToken | undefined {
+  private readString(final: boolean, preserveValue: boolean): JSONToken | undefined {
     const start = this.position;
     let index = start + 1;
     let hasEscape = false;
@@ -101,8 +116,12 @@ export class JSONTokenizer {
     while (index < this.buffer.length) {
       const char = this.buffer[index];
       if (char === '"') {
-        const raw = this.buffer.slice(start, index + 1);
         this.position = index + 1;
+        if (!preserveValue) {
+          return SKIPPED_STRING_TOKEN;
+        }
+
+        const raw = this.buffer.slice(start, index + 1);
         if (!hasEscape) {
           return { type: "string", value: this.buffer.slice(start + 1, index), output: raw };
         }
@@ -113,6 +132,41 @@ export class JSONTokenizer {
 
       if (char === "\\") {
         hasEscape = true;
+        if (index + 1 >= this.buffer.length) {
+          if (final) {
+            throw new SyntaxError("Unterminated JSON string");
+          }
+          return undefined;
+        }
+
+        const escaped = this.buffer[index + 1];
+        if (escaped === "u") {
+          if (index + 5 >= this.buffer.length) {
+            if (final) {
+              throw new SyntaxError("Invalid Unicode escape in JSON string");
+            }
+            return undefined;
+          }
+          for (let cursor = index + 2; cursor <= index + 5; cursor += 1) {
+            if (!isHexDigit(this.buffer.charCodeAt(cursor))) {
+              throw new SyntaxError("Invalid Unicode escape in JSON string");
+            }
+          }
+          index += 6;
+          continue;
+        }
+        if (
+          escaped !== '"' &&
+          escaped !== "\\" &&
+          escaped !== "/" &&
+          escaped !== "b" &&
+          escaped !== "f" &&
+          escaped !== "n" &&
+          escaped !== "r" &&
+          escaped !== "t"
+        ) {
+          throw new SyntaxError("Invalid escape in JSON string");
+        }
         index += 2;
         continue;
       }
@@ -143,15 +197,15 @@ export class JSONTokenizer {
 
     if (this.buffer.startsWith("true", this.position)) {
       this.position += 4;
-      return { type: "boolean", value: true };
+      return TRUE_TOKEN;
     }
     if (this.buffer.startsWith("false", this.position)) {
       this.position += 5;
-      return { type: "boolean", value: false };
+      return FALSE_TOKEN;
     }
     if (this.buffer.startsWith("null", this.position)) {
       this.position += 4;
-      return { type: "null" };
+      return NULL_TOKEN;
     }
 
     throw new SyntaxError(`Invalid JSON literal near: ${this.buffer.slice(this.position, this.position + 10)}`);
@@ -162,7 +216,7 @@ export class JSONTokenizer {
     return !final && remaining < literal.length && literal.startsWith(this.buffer.slice(this.position));
   }
 
-  private readNumber(final: boolean): JSONToken | undefined {
+  private readNumber(final: boolean, preserveValue: boolean): JSONToken | undefined {
     const start = this.position;
     let index = start;
 
@@ -175,11 +229,14 @@ export class JSONTokenizer {
     }
 
     const raw = this.buffer.slice(start, index);
-    if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw)) {
+    if (!NUMBER_PATTERN.test(raw)) {
       throw new SyntaxError(`Invalid JSON number: ${raw}`);
     }
 
     this.position = index;
+    if (!preserveValue) {
+      return SKIPPED_NUMBER_TOKEN;
+    }
     return { type: "number", raw, value: Number(raw) };
   }
 
@@ -202,6 +259,14 @@ function isNumberCharacter(value: string | undefined): boolean {
     value === "e" ||
     value === "E" ||
     isDigit(value)
+  );
+}
+
+function isHexDigit(value: number): boolean {
+  return (
+    (value >= 0x30 && value <= 0x39) ||
+    (value >= 0x41 && value <= 0x46) ||
+    (value >= 0x61 && value <= 0x66)
   );
 }
 

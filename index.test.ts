@@ -198,6 +198,18 @@ describe("JSONRewriter", () => {
     await expect(output.text()).rejects.toThrow();
   });
 
+  test("errors transformed body on invalid string escapes inside removed subtrees", async () => {
+    const output = new JSONRewriter()
+      .on("$.drop", {
+        object(node) {
+          node.remove();
+        },
+      })
+      .transform(chunkedResponse(['{"drop":{"a":"\\x"},"keep":true}']));
+
+    await expect(output.text()).rejects.toThrow();
+  });
+
   test("errors transformed body when handler throws", async () => {
     const output = new JSONRewriter()
       .on("$.a", {
