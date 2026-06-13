@@ -16,6 +16,15 @@ interface HandlerRegistration {
   handler: JSONHandler;
 }
 
+interface ValueHandlerGroups {
+  object: HandlerRegistration[];
+  array: HandlerRegistration[];
+  string: HandlerRegistration[];
+  number: HandlerRegistration[];
+  boolean: HandlerRegistration[];
+  null: HandlerRegistration[];
+}
+
 type ObjectState = "keyOrEnd" | "key" | "colon" | "value" | "commaOrEnd";
 type ArrayState = "valueOrEnd" | "value" | "commaOrEnd";
 
@@ -25,6 +34,7 @@ interface ObjectFrame {
   state: ObjectState;
   first: boolean;
   pendingKey?: string;
+  pendingPath?: PathSegment[];
   pendingOutputKeyJSON?: string;
   appendEntries: ObjectEntry[];
 }
@@ -45,7 +55,7 @@ const EMPTY_PATH: PathSegment[] = [];
 export class JSONRewriter {
   private readonly handlers: HandlerRegistration[] = [];
   private readonly keyHandlers: HandlerRegistration[] = [];
-  private readonly valueHandlers: HandlerRegistration[] = [];
+  private readonly valueHandlers: ValueHandlerGroups = createValueHandlerGroups();
 
   on(selector: string, handler: JSONHandler): this {
     const registration = { selector: compileSelector(selector), handler };
@@ -53,9 +63,7 @@ export class JSONRewriter {
     if (handler.key) {
       this.keyHandlers.push(registration);
     }
-    if (handler.value || handler.object || handler.array || handler.string || handler.number || handler.boolean || handler.null) {
-      this.valueHandlers.push(registration);
-    }
+    addValueHandlerRegistration(this.valueHandlers, registration);
     return this;
   }
 
@@ -69,6 +77,7 @@ export class JSONRewriter {
 
     const tokenizer = new JSONTokenizer();
     const decoder = new TextDecoder();
+    const canSkipContainerValues = this.valueHandlers.object.length > 0 || this.valueHandlers.array.length > 0;
     let processor: StreamingProcessor | undefined;
     let output: BufferedOutput | undefined;
 
@@ -80,12 +89,26 @@ export class JSONRewriter {
         },
         transform(chunk) {
           const text = decoder.decode(chunk, { stream: true });
-          tokenizer.feedTokens(text, false, (token) => processor?.process(token));
+          if (canSkipContainerValues) {
+            tokenizer.feedTokens(text, false, (token) => {
+              processor?.process(token);
+              tokenizer.preserveTokenValues = processor?.needsTokenValues() ?? true;
+            });
+          } else {
+            tokenizer.feedTokens(text, false, (token) => processor?.process(token));
+          }
           output?.flushReady();
         },
         flush() {
           const tail = decoder.decode();
-          tokenizer.feedTokens(tail, true, (token) => processor?.process(token));
+          if (canSkipContainerValues) {
+            tokenizer.feedTokens(tail, true, (token) => {
+              processor?.process(token);
+              tokenizer.preserveTokenValues = processor?.needsTokenValues() ?? true;
+            });
+          } else {
+            tokenizer.feedTokens(tail, true, (token) => processor?.process(token));
+          }
           processor?.finish();
           output?.flush();
         },
@@ -138,10 +161,10 @@ class StreamingProcessor {
 
   constructor(
     private readonly keyHandlers: readonly HandlerRegistration[],
-    private readonly valueHandlers: readonly HandlerRegistration[],
+    private readonly valueHandlers: ValueHandlerGroups,
     private readonly emit: (chunk: string) => void,
   ) {
-    this.trackPaths = keyHandlers.length > 0 || valueHandlers.length > 0;
+    this.trackPaths = keyHandlers.length > 0 || hasValueHandlers(valueHandlers);
   }
 
   process(token: JSONToken): void {
@@ -172,6 +195,10 @@ class StreamingProcessor {
     }
   }
 
+  needsTokenValues(): boolean {
+    return this.skipValidator === undefined;
+  }
+
   private processRootToken(token: JSONToken): void {
     if (this.rootState === "done") {
       throw new SyntaxError("Unexpected token after root JSON value");
@@ -181,7 +208,7 @@ class StreamingProcessor {
       throw new SyntaxError("Expected root JSON value");
     }
 
-    this.processValueToken(token, []);
+    this.processValueToken(token, EMPTY_PATH);
   }
 
   private processObjectToken(frame: ObjectFrame, token: JSONToken): void {
@@ -198,12 +225,13 @@ class StreamingProcessor {
       }
       const path = this.trackPaths ? [...frame.path, token.value] : EMPTY_PATH;
       let outputKeyJSON = token.output;
-      if (this.keyHandlers.length > 0) {
+      if (this.hasMatchingKeyHandler(path)) {
         const key = new KeyNode(path, token.value);
         this.applyKeyHandlers(path, key);
         outputKeyJSON = key.name === token.value ? token.output : JSON.stringify(key.name);
       }
       frame.pendingKey = token.value;
+      frame.pendingPath = path;
       frame.pendingOutputKeyJSON = outputKeyJSON;
       frame.state = "colon";
       return;
@@ -221,7 +249,7 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected object value");
       }
-      this.processValueToken(token, this.trackPaths ? [...frame.path, requirePendingKey(frame)] : EMPTY_PATH);
+      this.processValueToken(token, this.trackPaths ? requirePendingPath(frame) : EMPTY_PATH);
       return;
     }
 
@@ -270,7 +298,8 @@ class StreamingProcessor {
 
   private processValueToken(token: JSONToken, path: PathSegment[]): void {
     if (token.type === "startObject") {
-      if (this.valueHandlers.length === 0) {
+      const handlers = this.valueHandlers.object;
+      if (!this.hasMatchingValueHandler(path, handlers)) {
         this.acceptValueStart(false);
         this.emit("{");
         this.stack.push({
@@ -284,7 +313,7 @@ class StreamingProcessor {
       }
 
       const node = new ContainerNode(path) as JSONObjectNodeImpl;
-      this.applyValueHandlers(path, node, "object");
+      this.applyValueHandlers(path, node, "object", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
@@ -313,7 +342,8 @@ class StreamingProcessor {
     }
 
     if (token.type === "startArray") {
-      if (this.valueHandlers.length === 0) {
+      const handlers = this.valueHandlers.array;
+      if (!this.hasMatchingValueHandler(path, handlers)) {
         this.acceptValueStart(false);
         this.emit("[");
         this.stack.push({
@@ -328,7 +358,7 @@ class StreamingProcessor {
       }
 
       const node = new ContainerNode(path) as JSONArrayNodeImpl;
-      this.applyValueHandlers(path, node, "array");
+      this.applyValueHandlers(path, node, "array", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
@@ -357,14 +387,16 @@ class StreamingProcessor {
       return;
     }
 
-    if (this.valueHandlers.length === 0) {
+    const kind = scalarKind(token);
+    const handlers = this.valueHandlers[kind];
+    if (!this.hasMatchingValueHandler(path, handlers)) {
       this.acceptValueStart(false);
       this.emit(tokenToJSON(token));
       return;
     }
 
     const scalar = createScalarNode(token, path);
-    this.applyValueHandlers(path, scalar, scalarKind(token));
+    this.applyValueHandlers(path, scalar, kind, handlers);
     this.acceptValueStart(scalar.removed);
     if (scalar.replacement !== undefined) {
       this.emit(scalar.replacement);
@@ -397,6 +429,7 @@ class StreamingProcessor {
         parent.first = false;
       }
       parent.pendingKey = undefined;
+      parent.pendingPath = undefined;
       parent.pendingOutputKeyJSON = undefined;
       parent.state = "commaOrEnd";
       return;
@@ -436,8 +469,26 @@ class StreamingProcessor {
     }
   }
 
-  private applyValueHandlers(path: readonly PathSegment[], node: MutableNode | ContainerNode, kind: ValueKind): void {
-    for (const registration of this.valueHandlers) {
+  private hasMatchingKeyHandler(path: readonly PathSegment[]): boolean {
+    for (const registration of this.keyHandlers) {
+      if (registration.selector.matches(path)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private hasMatchingValueHandler(path: readonly PathSegment[], handlers: readonly HandlerRegistration[]): boolean {
+    for (const registration of handlers) {
+      if (registration.selector.matches(path)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private applyValueHandlers(path: readonly PathSegment[], node: MutableNode | ContainerNode, kind: ValueKind, handlers: readonly HandlerRegistration[]): void {
+    for (const registration of handlers) {
       if (!registration.selector.matches(path)) {
         continue;
       }
@@ -582,6 +633,60 @@ class SkipValidator {
 
 type ValueKind = "object" | "array" | "string" | "number" | "boolean" | "null";
 
+function createValueHandlerGroups(): ValueHandlerGroups {
+  return {
+    object: [],
+    array: [],
+    string: [],
+    number: [],
+    boolean: [],
+    null: [],
+  };
+}
+
+function addValueHandlerRegistration(groups: ValueHandlerGroups, registration: HandlerRegistration): void {
+  const handler = registration.handler;
+  if (handler.value) {
+    groups.object.push(registration);
+    groups.array.push(registration);
+    groups.string.push(registration);
+    groups.number.push(registration);
+    groups.boolean.push(registration);
+    groups.null.push(registration);
+    return;
+  }
+
+  if (handler.object) {
+    groups.object.push(registration);
+  }
+  if (handler.array) {
+    groups.array.push(registration);
+  }
+  if (handler.string) {
+    groups.string.push(registration);
+  }
+  if (handler.number) {
+    groups.number.push(registration);
+  }
+  if (handler.boolean) {
+    groups.boolean.push(registration);
+  }
+  if (handler.null) {
+    groups.null.push(registration);
+  }
+}
+
+function hasValueHandlers(groups: ValueHandlerGroups): boolean {
+  return (
+    groups.object.length > 0 ||
+    groups.array.length > 0 ||
+    groups.string.length > 0 ||
+    groups.number.length > 0 ||
+    groups.boolean.length > 0 ||
+    groups.null.length > 0
+  );
+}
+
 class MutableNode<T = JSONValue> implements JSONNode<T> {
   removed = false;
   replacement: string | undefined;
@@ -716,9 +821,9 @@ function stringifyJSONValue(value: JSONValue): string {
   return json;
 }
 
-function requirePendingKey(frame: ObjectFrame): string {
-  if (frame.pendingKey === undefined) {
+function requirePendingPath(frame: ObjectFrame): PathSegment[] {
+  if (frame.pendingPath === undefined) {
     throw new SyntaxError("Missing object key");
   }
-  return frame.pendingKey;
+  return frame.pendingPath;
 }
