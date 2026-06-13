@@ -8,7 +8,9 @@ type SelectorStep =
 
 export interface CompiledSelector {
   readonly source: string;
-  matches(path: readonly PathSegment[]): boolean;
+  // Matches against the first `length` segments of `path`. `path` is a shared,
+  // reused buffer in the hot path, so entries beyond `length` must be ignored.
+  matches(path: readonly PathSegment[], length: number): boolean;
 }
 
 export function compileSelector(source: string): CompiledSelector {
@@ -17,8 +19,8 @@ export function compileSelector(source: string): CompiledSelector {
   if (steps.length === 0) {
     return {
       source,
-      matches(path) {
-        return path.length === 0;
+      matches(_path, length) {
+        return length === 0;
       },
     };
   }
@@ -27,8 +29,8 @@ export function compileSelector(source: string): CompiledSelector {
     const name = steps[0].name;
     return {
       source,
-      matches(path) {
-        return path[path.length - 1] === name;
+      matches(path, length) {
+        return length > 0 && path[length - 1] === name;
       },
     };
   }
@@ -36,22 +38,22 @@ export function compileSelector(source: string): CompiledSelector {
   if (!steps.some((step) => step.type === "recursiveProperty")) {
     return {
       source,
-      matches(path) {
-        return matchExactSteps(steps, path);
+      matches(path, length) {
+        return matchExactSteps(steps, path, length);
       },
     };
   }
 
   return {
     source,
-    matches(path) {
-      return matchSteps(steps, path, 0, 0);
+    matches(path, length) {
+      return matchSteps(steps, path, length, 0, 0);
     },
   };
 }
 
-function matchExactSteps(steps: readonly SelectorStep[], path: readonly PathSegment[]): boolean {
-  if (steps.length !== path.length) {
+function matchExactSteps(steps: readonly SelectorStep[], path: readonly PathSegment[], length: number): boolean {
+  if (steps.length !== length) {
     return false;
   }
 
@@ -195,11 +197,12 @@ function readIdentifier(source: string, start: number): { value: string; next: n
 function matchSteps(
   steps: readonly SelectorStep[],
   path: readonly PathSegment[],
+  length: number,
   stepIndex: number,
   pathIndex: number,
 ): boolean {
   if (stepIndex === steps.length) {
-    return pathIndex === path.length;
+    return pathIndex === length;
   }
 
   const step = steps[stepIndex];
@@ -208,26 +211,26 @@ function matchSteps(
   }
 
   if (step.type === "recursiveProperty") {
-    for (let i = pathIndex; i < path.length; i += 1) {
-      if (path[i] === step.name && matchSteps(steps, path, stepIndex + 1, i + 1)) {
+    for (let i = pathIndex; i < length; i += 1) {
+      if (path[i] === step.name && matchSteps(steps, path, length, stepIndex + 1, i + 1)) {
         return true;
       }
     }
     return false;
   }
 
-  const segment = path[pathIndex];
-  if (segment === undefined) {
+  if (pathIndex >= length) {
     return false;
   }
+  const segment = path[pathIndex];
 
   if (step.type === "wildcard") {
-    return matchSteps(steps, path, stepIndex + 1, pathIndex + 1);
+    return matchSteps(steps, path, length, stepIndex + 1, pathIndex + 1);
   }
 
   if (step.type === "property") {
-    return segment === step.name && matchSteps(steps, path, stepIndex + 1, pathIndex + 1);
+    return segment === step.name && matchSteps(steps, path, length, stepIndex + 1, pathIndex + 1);
   }
 
-  return segment === step.index && matchSteps(steps, path, stepIndex + 1, pathIndex + 1);
+  return segment === step.index && matchSteps(steps, path, length, stepIndex + 1, pathIndex + 1);
 }
