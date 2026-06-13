@@ -1,0 +1,179 @@
+export type JSONToken =
+  | { type: "startObject" }
+  | { type: "endObject" }
+  | { type: "startArray" }
+  | { type: "endArray" }
+  | { type: "colon" }
+  | { type: "comma" }
+  | { type: "string"; value: string }
+  | { type: "number"; raw: string; value: number }
+  | { type: "boolean"; value: boolean }
+  | { type: "null" };
+
+export class JSONTokenizer {
+  private buffer = "";
+  private position = 0;
+
+  feed(chunk: string, final = false): JSONToken[] {
+    this.buffer += chunk;
+    const tokens: JSONToken[] = [];
+
+    while (true) {
+      this.skipWhitespace();
+      if (this.position >= this.buffer.length) {
+        break;
+      }
+
+      const token = this.readToken(final);
+      if (!token) {
+        break;
+      }
+      tokens.push(token);
+    }
+
+    if (this.position > 0) {
+      this.buffer = this.buffer.slice(this.position);
+      this.position = 0;
+    }
+
+    if (final) {
+      this.skipWhitespace();
+      if (this.position < this.buffer.length) {
+        throw new SyntaxError(`Invalid JSON near: ${this.buffer.slice(this.position, this.position + 20)}`);
+      }
+      this.buffer = "";
+      this.position = 0;
+    }
+
+    return tokens;
+  }
+
+  private readToken(final: boolean): JSONToken | undefined {
+    const char = this.buffer[this.position];
+
+    if (char === "{") {
+      this.position += 1;
+      return { type: "startObject" };
+    }
+    if (char === "}") {
+      this.position += 1;
+      return { type: "endObject" };
+    }
+    if (char === "[") {
+      this.position += 1;
+      return { type: "startArray" };
+    }
+    if (char === "]") {
+      this.position += 1;
+      return { type: "endArray" };
+    }
+    if (char === ":") {
+      this.position += 1;
+      return { type: "colon" };
+    }
+    if (char === ",") {
+      this.position += 1;
+      return { type: "comma" };
+    }
+    if (char === '"') {
+      return this.readString(final);
+    }
+    if (char === "t" || char === "f" || char === "n") {
+      return this.readLiteral(final);
+    }
+    if (char === "-" || isDigit(char)) {
+      return this.readNumber(final);
+    }
+
+    throw new SyntaxError(`Unexpected JSON character: ${char}`);
+  }
+
+  private readString(final: boolean): JSONToken | undefined {
+    const start = this.position;
+    let index = start + 1;
+
+    while (index < this.buffer.length) {
+      const char = this.buffer[index];
+      if (char === '"') {
+        const raw = this.buffer.slice(start, index + 1);
+        this.position = index + 1;
+        return { type: "string", value: JSON.parse(raw) as string };
+      }
+
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+
+      if ((char?.charCodeAt(0) ?? 0) < 0x20) {
+        throw new SyntaxError("Unexpected control character in JSON string");
+      }
+
+      index += 1;
+    }
+
+    if (final) {
+      throw new SyntaxError("Unterminated JSON string");
+    }
+    return undefined;
+  }
+
+  private readLiteral(final: boolean): JSONToken | undefined {
+    const rest = this.buffer.slice(this.position);
+    if ("true".startsWith(rest) && rest.length < 4 && !final) {
+      return undefined;
+    }
+    if ("false".startsWith(rest) && rest.length < 5 && !final) {
+      return undefined;
+    }
+    if ("null".startsWith(rest) && rest.length < 4 && !final) {
+      return undefined;
+    }
+
+    if (rest.startsWith("true")) {
+      this.position += 4;
+      return { type: "boolean", value: true };
+    }
+    if (rest.startsWith("false")) {
+      this.position += 5;
+      return { type: "boolean", value: false };
+    }
+    if (rest.startsWith("null")) {
+      this.position += 4;
+      return { type: "null" };
+    }
+
+    throw new SyntaxError(`Invalid JSON literal near: ${rest.slice(0, 10)}`);
+  }
+
+  private readNumber(final: boolean): JSONToken | undefined {
+    const start = this.position;
+    let index = start;
+
+    while (index < this.buffer.length && /[-+0-9.eE]/.test(this.buffer[index] ?? "")) {
+      index += 1;
+    }
+
+    if (index === this.buffer.length && !final) {
+      return undefined;
+    }
+
+    const raw = this.buffer.slice(start, index);
+    if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw)) {
+      throw new SyntaxError(`Invalid JSON number: ${raw}`);
+    }
+
+    this.position = index;
+    return { type: "number", raw, value: Number(raw) };
+  }
+
+  private skipWhitespace(): void {
+    while (/\s/.test(this.buffer[this.position] ?? "")) {
+      this.position += 1;
+    }
+  }
+}
+
+function isDigit(value: string | undefined): boolean {
+  return value !== undefined && value >= "0" && value <= "9";
+}
