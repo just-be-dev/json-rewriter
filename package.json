@@ -1,5 +1,5 @@
 {
-  "name": "json-rewriter",
+  "name": "@just-be/json-rewriter",
   "module": "index.ts",
   "type": "module",
   "license": "MIT",
