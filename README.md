@@ -135,6 +135,24 @@ Subtree removal and replacement skip the incoming subtree token stream instead o
 bun test
 ```
 
+Performance tests are opt-in because they process a large npm packument and have timing-sensitive assertions:
+
+```bash
+bun run perf
+```
+
+## Benchmark
+
+```bash
+bun run bench
+```
+
+The performance test and benchmark download the `wrangler` npm packument on first run, cache it in `.benchdata`, and measure streaming rewrite throughput for pass-through and representative mutations. The benchmark reports mean, p50, p95, min, max, throughput, and output size. You can tune it with `--iterations`, `--warmup`, and `--chunk-size`:
+
+```bash
+bun run bench -- --iterations 25 --warmup 5 --chunk-size 32768
+```
+
 ## Typecheck
 
 ```bash
