@@ -14,12 +14,72 @@ export interface CompiledSelector {
 export function compileSelector(source: string): CompiledSelector {
   const steps = parseSelector(source);
 
+  if (steps.length === 0) {
+    return {
+      source,
+      matches(path) {
+        return path.length === 0;
+      },
+    };
+  }
+
+  if (steps.length === 1 && steps[0]?.type === "recursiveProperty") {
+    const name = steps[0].name;
+    return {
+      source,
+      matches(path) {
+        return path[path.length - 1] === name;
+      },
+    };
+  }
+
+  if (!steps.some((step) => step.type === "recursiveProperty")) {
+    return {
+      source,
+      matches(path) {
+        return matchExactSteps(steps, path);
+      },
+    };
+  }
+
   return {
     source,
     matches(path) {
       return matchSteps(steps, path, 0, 0);
     },
   };
+}
+
+function matchExactSteps(steps: readonly SelectorStep[], path: readonly PathSegment[]): boolean {
+  if (steps.length !== path.length) {
+    return false;
+  }
+
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    const segment = path[index];
+
+    if (!step) {
+      return false;
+    }
+    if (step.type === "wildcard") {
+      continue;
+    }
+    if (step.type === "property") {
+      if (segment !== step.name) {
+        return false;
+      }
+      continue;
+    }
+    if (step.type === "index" && segment !== step.index) {
+      return false;
+    }
+    if (step.type === "recursiveProperty") {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function parseSelector(source: string): SelectorStep[] {

@@ -25,7 +25,7 @@ interface ObjectFrame {
   state: ObjectState;
   first: boolean;
   pendingKey?: string;
-  pendingOutputKey?: string;
+  pendingOutputKeyJSON?: string;
   appendEntries: ObjectEntry[];
 }
 
@@ -40,6 +40,7 @@ interface ArrayFrame {
 
 type Frame = ObjectFrame | ArrayFrame;
 type ObjectEntry = { key: string; value: JSONValue };
+const EMPTY_PATH: PathSegment[] = [];
 
 export class JSONRewriter {
   private readonly handlers: HandlerRegistration[] = [];
@@ -133,12 +134,15 @@ class StreamingProcessor {
   private readonly stack: Frame[] = [];
   private rootState: "value" | "done" = "value";
   private skipValidator: SkipValidator | undefined;
+  private readonly trackPaths: boolean;
 
   constructor(
     private readonly keyHandlers: readonly HandlerRegistration[],
     private readonly valueHandlers: readonly HandlerRegistration[],
     private readonly emit: (chunk: string) => void,
-  ) {}
+  ) {
+    this.trackPaths = keyHandlers.length > 0 || valueHandlers.length > 0;
+  }
 
   process(token: JSONToken): void {
     if (this.skipValidator) {
@@ -192,15 +196,15 @@ class StreamingProcessor {
       if (token.type !== "string") {
         throw new SyntaxError("Expected object key");
       }
-      const path = [...frame.path, token.value];
-      let outputKey = token.value;
+      const path = this.trackPaths ? [...frame.path, token.value] : EMPTY_PATH;
+      let outputKeyJSON = token.output;
       if (this.keyHandlers.length > 0) {
         const key = new KeyNode(path, token.value);
         this.applyKeyHandlers(path, key);
-        outputKey = key.name;
+        outputKeyJSON = key.name === token.value ? token.output : JSON.stringify(key.name);
       }
       frame.pendingKey = token.value;
-      frame.pendingOutputKey = outputKey;
+      frame.pendingOutputKeyJSON = outputKeyJSON;
       frame.state = "colon";
       return;
     }
@@ -217,7 +221,7 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected object value");
       }
-      this.processValueToken(token, [...frame.path, requirePendingKey(frame)]);
+      this.processValueToken(token, this.trackPaths ? [...frame.path, requirePendingKey(frame)] : EMPTY_PATH);
       return;
     }
 
@@ -241,7 +245,7 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected array value");
       }
-      this.processValueToken(token, [...frame.path, frame.index]);
+      this.processValueToken(token, this.trackPaths ? [...frame.path, frame.index] : EMPTY_PATH);
       return;
     }
 
@@ -249,7 +253,7 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected array value");
       }
-      this.processValueToken(token, [...frame.path, frame.index]);
+      this.processValueToken(token, this.trackPaths ? [...frame.path, frame.index] : EMPTY_PATH);
       return;
     }
 
@@ -381,19 +385,19 @@ class StreamingProcessor {
     }
 
     if (parent.type === "object") {
-      const key = parent.pendingOutputKey;
-      if (key === undefined) {
+      const keyJSON = parent.pendingOutputKeyJSON;
+      if (keyJSON === undefined) {
         throw new SyntaxError("Missing object key");
       }
       if (!removed) {
         if (!parent.first) {
           this.emit(",");
         }
-        this.emit(`${JSON.stringify(key)}:`);
+        this.emit(`${keyJSON}:`);
         parent.first = false;
       }
       parent.pendingKey = undefined;
-      parent.pendingOutputKey = undefined;
+      parent.pendingOutputKeyJSON = undefined;
       parent.state = "commaOrEnd";
       return;
     }

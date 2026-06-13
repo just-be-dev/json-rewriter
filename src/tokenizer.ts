@@ -131,38 +131,42 @@ export class JSONTokenizer {
   }
 
   private readLiteral(final: boolean): JSONToken | undefined {
-    const rest = this.buffer.slice(this.position);
-    if ("true".startsWith(rest) && rest.length < 4 && !final) {
+    if (this.matchesPartialLiteral("true", final)) {
       return undefined;
     }
-    if ("false".startsWith(rest) && rest.length < 5 && !final) {
+    if (this.matchesPartialLiteral("false", final)) {
       return undefined;
     }
-    if ("null".startsWith(rest) && rest.length < 4 && !final) {
+    if (this.matchesPartialLiteral("null", final)) {
       return undefined;
     }
 
-    if (rest.startsWith("true")) {
+    if (this.buffer.startsWith("true", this.position)) {
       this.position += 4;
       return { type: "boolean", value: true };
     }
-    if (rest.startsWith("false")) {
+    if (this.buffer.startsWith("false", this.position)) {
       this.position += 5;
       return { type: "boolean", value: false };
     }
-    if (rest.startsWith("null")) {
+    if (this.buffer.startsWith("null", this.position)) {
       this.position += 4;
       return { type: "null" };
     }
 
-    throw new SyntaxError(`Invalid JSON literal near: ${rest.slice(0, 10)}`);
+    throw new SyntaxError(`Invalid JSON literal near: ${this.buffer.slice(this.position, this.position + 10)}`);
+  }
+
+  private matchesPartialLiteral(literal: string, final: boolean): boolean {
+    const remaining = this.buffer.length - this.position;
+    return !final && remaining < literal.length && literal.startsWith(this.buffer.slice(this.position));
   }
 
   private readNumber(final: boolean): JSONToken | undefined {
     const start = this.position;
     let index = start;
 
-    while (index < this.buffer.length && /[-+0-9.eE]/.test(this.buffer[index] ?? "")) {
+    while (index < this.buffer.length && isNumberCharacter(this.buffer[index])) {
       index += 1;
     }
 
@@ -180,7 +184,7 @@ export class JSONTokenizer {
   }
 
   private skipWhitespace(): void {
-    while (/\s/.test(this.buffer[this.position] ?? "")) {
+    while (isJSONWhitespace(this.buffer.charCodeAt(this.position))) {
       this.position += 1;
     }
   }
@@ -188,4 +192,19 @@ export class JSONTokenizer {
 
 function isDigit(value: string | undefined): boolean {
   return value !== undefined && value >= "0" && value <= "9";
+}
+
+function isNumberCharacter(value: string | undefined): boolean {
+  return (
+    value === "-" ||
+    value === "+" ||
+    value === "." ||
+    value === "e" ||
+    value === "E" ||
+    isDigit(value)
+  );
+}
+
+function isJSONWhitespace(value: number): boolean {
+  return value === 0x20 || value === 0x0a || value === 0x0d || value === 0x09;
 }
