@@ -76,30 +76,38 @@ export class JSONRewriter {
 
     const tokenizer = new JSONTokenizer();
     const decoder = new TextDecoder();
-    let processor: StreamingProcessor | undefined;
+    let processor: CopyThroughProcessor | CopyOnlyProcessor | undefined;
     let output: BufferedOutput | undefined;
-    let processToken: ((token: JSONToken) => void) | undefined;
+    let processToken: ((token: JSONToken, start: number, end: number, buffer: string) => void) | undefined;
+    let processWhitespace: ((start: number, end: number, buffer: string) => void) | undefined;
+    let flushProcessor: ((buffer: string, end: number) => void) | undefined;
 
     const stream = response.body.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         start: (controller) => {
           output = new BufferedOutput((chunk) => controller.enqueue(chunk));
-          // The processor toggles tokenizer.preserveTokenValues directly when it
-          // enters/leaves a skipped subtree, so the hot per-token loop stays a
-          // single call with no extra branch or property write.
-          processor = new StreamingProcessor(this.keyHandlers, this.valueHandlers, (chunk) => output?.write(chunk), (preserve) => {
-            tokenizer.preserveTokenValues = preserve;
-          });
-          processToken = (token) => processor?.process(token);
+          if (this.handlers.length === 0) {
+            processor = new CopyOnlyProcessor((chunk) => output?.write(chunk));
+            tokenizer.preserveTokenValues = false;
+          } else {
+            // The processor toggles tokenizer.preserveTokenValues directly when it
+            // enters/leaves a skipped subtree, so skipped values do not materialize.
+            processor = new CopyThroughProcessor(this.keyHandlers, this.valueHandlers, (chunk) => output?.write(chunk), (preserve) => {
+              tokenizer.preserveTokenValues = preserve;
+            });
+          }
+          processToken = (token, start, end, buffer) => processor?.process(token, start, end, buffer);
+          processWhitespace = (start, end, buffer) => processor?.processWhitespace(start, end, buffer);
+          flushProcessor = (buffer, end) => processor?.flush(buffer, end);
         },
         transform(chunk) {
           const text = decoder.decode(chunk, { stream: true });
-          tokenizer.feedTokens(text, false, processToken!);
+          tokenizer.feedTokens(text, false, processToken!, processWhitespace, flushProcessor);
           output?.flushReady();
         },
         flush() {
           const tail = decoder.decode();
-          tokenizer.feedTokens(tail, true, processToken!);
+          tokenizer.feedTokens(tail, true, processToken!, processWhitespace, flushProcessor);
           processor?.finish();
           output?.flush();
         },
@@ -144,7 +152,71 @@ class BufferedOutput {
   }
 }
 
-class StreamingProcessor {
+class CopyWriter {
+  private spanStart = 0;
+
+  constructor(private readonly emit: (chunk: string) => void) {}
+
+  write(chunk: string): void {
+    this.emit(chunk);
+  }
+
+  copyUntil(buffer: string, end: number): void {
+    if (end > this.spanStart) {
+      this.emit(buffer.slice(this.spanStart, end));
+    }
+    this.spanStart = end;
+  }
+
+  dropWhitespace(buffer: string, start: number, end: number): void {
+    this.copyUntil(buffer, start);
+    this.spanStart = end;
+  }
+
+  replaceRange(buffer: string, start: number, end: number, replacement: string): void {
+    this.copyUntil(buffer, start);
+    this.emit(replacement);
+    this.spanStart = end;
+  }
+
+  discardRange(buffer: string, start: number, end: number): void {
+    this.copyUntil(buffer, start);
+    this.spanStart = end;
+  }
+
+  discardThrough(end: number): void {
+    if (end > this.spanStart) {
+      this.spanStart = end;
+    }
+  }
+
+  flush(buffer: string, end: number): void {
+    this.copyUntil(buffer, end);
+    this.spanStart = 0;
+  }
+}
+
+class CopyOnlyProcessor {
+  private readonly writer: CopyWriter;
+
+  constructor(emit: (chunk: string) => void) {
+    this.writer = new CopyWriter(emit);
+  }
+
+  process(_token: JSONToken, _start: number, _end: number, _buffer: string): void {}
+
+  processWhitespace(start: number, end: number, buffer: string): void {
+    this.writer.dropWhitespace(buffer, start, end);
+  }
+
+  flush(buffer: string, end: number): void {
+    this.writer.flush(buffer, end);
+  }
+
+  finish(): void {}
+}
+
+class CopyThroughProcessor {
   private readonly stack: Frame[] = [];
   // Single reused buffer holding the path to the value currently being processed.
   // Selectors match against (pathBuf, length); we only snapshot a real array when
@@ -153,18 +225,21 @@ class StreamingProcessor {
   private rootState: "value" | "done" = "value";
   private skipValidator: SkipValidator | undefined;
   private readonly trackPaths: boolean;
+  private readonly writer: CopyWriter;
 
   constructor(
     private readonly keyHandlers: readonly HandlerRegistration[],
     private readonly valueHandlers: ValueHandlerGroups,
-    private readonly emit: (chunk: string) => void,
+    emit: (chunk: string) => void,
     private readonly setPreserveValues: (preserve: boolean) => void,
   ) {
     this.trackPaths = keyHandlers.length > 0 || hasValueHandlers(valueHandlers);
+    this.writer = new CopyWriter(emit);
   }
 
-  process(token: JSONToken): void {
+  process(token: JSONToken, start: number, end: number, buffer: string): void {
     if (this.skipValidator) {
+      this.writer.discardThrough(end);
       if (this.skipValidator.process(token)) {
         this.skipValidator = undefined;
         // Skipped subtree fully consumed; resume preserving token values.
@@ -175,16 +250,28 @@ class StreamingProcessor {
 
     const frame = this.currentFrame();
     if (!frame) {
-      this.processRootToken(token);
+      this.processRootToken(token, start, end, buffer);
       return;
     }
 
     if (frame.type === "object") {
-      this.processObjectToken(frame, token);
+      this.processObjectToken(frame, token, start, end, buffer);
       return;
     }
 
-    this.processArrayToken(frame, token);
+    this.processArrayToken(frame, token, start, end, buffer);
+  }
+
+  processWhitespace(start: number, end: number, buffer: string): void {
+    if (this.skipValidator) {
+      this.writer.discardThrough(end);
+      return;
+    }
+    this.writer.dropWhitespace(buffer, start, end);
+  }
+
+  flush(buffer: string, end: number): void {
+    this.writer.flush(buffer, end);
   }
 
   finish(): void {
@@ -199,7 +286,7 @@ class StreamingProcessor {
     this.setPreserveValues(false);
   }
 
-  private processRootToken(token: JSONToken): void {
+  private processRootToken(token: JSONToken, start: number, end: number, buffer: string): void {
     if (this.rootState === "done") {
       throw new SyntaxError("Unexpected token after root JSON value");
     }
@@ -208,16 +295,16 @@ class StreamingProcessor {
       throw new SyntaxError("Expected root JSON value");
     }
 
-    this.processValueToken(token, 0);
+    this.processValueToken(token, 0, start, end, buffer);
   }
 
-  private processObjectToken(frame: ObjectFrame, token: JSONToken): void {
+  private processObjectToken(frame: ObjectFrame, token: JSONToken, start: number, end: number, buffer: string): void {
     if (frame.state === "keyOrEnd" || frame.state === "key") {
       if (token.type === "endObject") {
         if (frame.state === "key") {
           throw new SyntaxError("Expected object key after ,");
         }
-        this.closeObject(frame);
+        this.closeObject(frame, start, buffer);
         return;
       }
       if (token.type !== "string") {
@@ -236,6 +323,7 @@ class StreamingProcessor {
         }
       }
       frame.pendingOutputKeyJSON = outputKeyJSON;
+      this.writer.discardRange(buffer, start, end);
       frame.state = "colon";
       return;
     }
@@ -244,6 +332,7 @@ class StreamingProcessor {
       if (token.type !== "colon") {
         throw new SyntaxError("Expected : after object key");
       }
+      this.writer.discardRange(buffer, start, end);
       frame.state = "value";
       return;
     }
@@ -252,25 +341,26 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected object value");
       }
-      this.processValueToken(token, frame.len + 1);
+      this.processValueToken(token, frame.len + 1, start, end, buffer);
       return;
     }
 
     if (token.type === "comma") {
+      this.writer.discardRange(buffer, start, end);
       frame.state = "key";
       return;
     }
     if (token.type === "endObject") {
-      this.closeObject(frame);
+      this.closeObject(frame, start, buffer);
       return;
     }
     throw new SyntaxError("Expected , or } after object value");
   }
 
-  private processArrayToken(frame: ArrayFrame, token: JSONToken): void {
+  private processArrayToken(frame: ArrayFrame, token: JSONToken, start: number, end: number, buffer: string): void {
     if (frame.state === "valueOrEnd") {
       if (token.type === "endArray") {
-        this.closeArray(frame);
+        this.closeArray(frame, start, buffer);
         return;
       }
       if (!isValueToken(token)) {
@@ -279,7 +369,7 @@ class StreamingProcessor {
       if (this.trackPaths) {
         this.pathBuf[frame.len] = frame.index;
       }
-      this.processValueToken(token, frame.len + 1);
+      this.processValueToken(token, frame.len + 1, start, end, buffer);
       return;
     }
 
@@ -290,27 +380,27 @@ class StreamingProcessor {
       if (this.trackPaths) {
         this.pathBuf[frame.len] = frame.index;
       }
-      this.processValueToken(token, frame.len + 1);
+      this.processValueToken(token, frame.len + 1, start, end, buffer);
       return;
     }
 
     if (token.type === "comma") {
+      this.writer.discardRange(buffer, start, end);
       frame.state = "value";
       return;
     }
     if (token.type === "endArray") {
-      this.closeArray(frame);
+      this.closeArray(frame, start, buffer);
       return;
     }
     throw new SyntaxError("Expected , or ] after array value");
   }
 
-  private processValueToken(token: JSONToken, len: number): void {
+  private processValueToken(token: JSONToken, len: number, start: number, end: number, buffer: string): void {
     if (token.type === "startObject") {
       const handlers = this.valueHandlers.object;
       if (!this.hasMatchingValueHandler(len, handlers)) {
         this.acceptValueStart(false);
-        this.emit("{");
         this.stack.push({
           type: "object",
           len,
@@ -325,17 +415,17 @@ class StreamingProcessor {
       this.applyValueHandlers(len, node, "object", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
-        this.emit(node.replacement);
+        this.writer.replaceRange(buffer, start, end, node.replacement);
         this.beginSkip("object");
         return;
       }
       if (node.removed) {
         this.emitRootNullIfNeeded(len);
+        this.writer.discardRange(buffer, start, end);
         this.beginSkip("object");
         return;
       }
 
-      this.emit("{");
       const frame: ObjectFrame = {
         type: "object",
         len,
@@ -343,8 +433,11 @@ class StreamingProcessor {
         first: true,
         appendEntries: node.appendEntries,
       };
+      if (node.prependEntries.length > 0) {
+        this.writer.copyUntil(buffer, end);
+      }
       for (const entry of node.prependEntries) {
-        writeObjectEntry(frame, entry, this.emit);
+        writeObjectEntry(frame, entry, (chunk) => this.writerChunk(chunk));
       }
       this.stack.push(frame);
       return;
@@ -354,7 +447,6 @@ class StreamingProcessor {
       const handlers = this.valueHandlers.array;
       if (!this.hasMatchingValueHandler(len, handlers)) {
         this.acceptValueStart(false);
-        this.emit("[");
         this.stack.push({
           type: "array",
           len,
@@ -370,17 +462,17 @@ class StreamingProcessor {
       this.applyValueHandlers(len, node, "array", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
-        this.emit(node.replacement);
+        this.writer.replaceRange(buffer, start, end, node.replacement);
         this.beginSkip("array");
         return;
       }
       if (node.removed) {
         this.emitRootNullIfNeeded(len);
+        this.writer.discardRange(buffer, start, end);
         this.beginSkip("array");
         return;
       }
 
-      this.emit("[");
       const frame: ArrayFrame = {
         type: "array",
         len,
@@ -389,8 +481,11 @@ class StreamingProcessor {
         index: 0,
         appendItems: node.appendItems,
       };
+      if (node.prependItems.length > 0) {
+        this.writer.copyUntil(buffer, end);
+      }
       for (const item of node.prependItems) {
-        writeArrayItem(frame, item, this.emit);
+        writeArrayItem(frame, item, (chunk) => this.writerChunk(chunk));
       }
       this.stack.push(frame);
       return;
@@ -400,7 +495,6 @@ class StreamingProcessor {
     const handlers = this.valueHandlers[kind];
     if (!this.hasMatchingValueHandler(len, handlers)) {
       this.acceptValueStart(false);
-      this.emit(tokenToJSON(token));
       return;
     }
 
@@ -408,14 +502,14 @@ class StreamingProcessor {
     this.applyValueHandlers(len, scalar, kind, handlers);
     this.acceptValueStart(scalar.removed);
     if (scalar.replacement !== undefined) {
-      this.emit(scalar.replacement);
+      this.writer.replaceRange(buffer, start, end, scalar.replacement);
       return;
     }
     if (scalar.removed) {
       this.emitRootNullIfNeeded(len);
+      this.writer.discardRange(buffer, start, end);
       return;
     }
-    this.emit(tokenToJSON(token));
   }
 
   private snapshotPath(len: number): PathSegment[] {
@@ -436,9 +530,9 @@ class StreamingProcessor {
       }
       if (!removed) {
         if (!parent.first) {
-          this.emit(",");
+          this.writerChunk(",");
         }
-        this.emit(`${keyJSON}:`);
+        this.writerChunk(`${keyJSON}:`);
         parent.first = false;
       }
       parent.pendingOutputKeyJSON = undefined;
@@ -448,7 +542,7 @@ class StreamingProcessor {
 
     if (!removed) {
       if (!parent.first) {
-        this.emit(",");
+        this.writerChunk(",");
       }
       parent.first = false;
     }
@@ -456,19 +550,23 @@ class StreamingProcessor {
     parent.state = "commaOrEnd";
   }
 
-  private closeObject(frame: ObjectFrame): void {
-    for (const entry of frame.appendEntries) {
-      writeObjectEntry(frame, entry, this.emit);
+  private closeObject(frame: ObjectFrame, start: number, buffer: string): void {
+    if (frame.appendEntries.length > 0) {
+      this.writer.copyUntil(buffer, start);
     }
-    this.emit("}");
+    for (const entry of frame.appendEntries) {
+      writeObjectEntry(frame, entry, (chunk) => this.writerChunk(chunk));
+    }
     this.stack.pop();
   }
 
-  private closeArray(frame: ArrayFrame): void {
-    for (const item of frame.appendItems) {
-      writeArrayItem(frame, item, this.emit);
+  private closeArray(frame: ArrayFrame, start: number, buffer: string): void {
+    if (frame.appendItems.length > 0) {
+      this.writer.copyUntil(buffer, start);
     }
-    this.emit("]");
+    for (const item of frame.appendItems) {
+      writeArrayItem(frame, item, (chunk) => this.writerChunk(chunk));
+    }
     this.stack.pop();
   }
 
@@ -522,8 +620,14 @@ class StreamingProcessor {
 
   private emitRootNullIfNeeded(len: number): void {
     if (len === 0) {
-      this.emit("null");
+      this.writerChunk("null");
     }
+  }
+
+  private writerChunk(chunk: string): void {
+    // Inserted/reconstructed fragments bypass the copy cursor. Original source
+    // bytes are still emitted by CopyWriter when spans are flushed.
+    this.writer.write(chunk);
   }
 
   private currentFrame(): Frame | undefined {
@@ -785,22 +889,6 @@ function isValueToken(token: JSONToken): boolean {
 function scalarKind(token: JSONToken): ValueKind {
   if (token.type === "string" || token.type === "number" || token.type === "boolean") {
     return token.type;
-  }
-  if (token.type === "null") {
-    return "null";
-  }
-  throw new TypeError("Expected scalar token");
-}
-
-function tokenToJSON(token: JSONToken): string {
-  if (token.type === "string") {
-    return token.output;
-  }
-  if (token.type === "number") {
-    return token.raw;
-  }
-  if (token.type === "boolean") {
-    return token.value ? "true" : "false";
   }
   if (token.type === "null") {
     return "null";
