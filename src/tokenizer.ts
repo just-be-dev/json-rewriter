@@ -10,6 +10,10 @@ export type JSONToken =
   | { type: "boolean"; value: boolean }
   | { type: "null" };
 
+export type JSONTokenCallback = (token: JSONToken, start: number, end: number, buffer: string) => void;
+export type JSONWhitespaceCallback = (start: number, end: number, buffer: string) => void;
+export type JSONFlushCallback = (buffer: string, end: number) => void;
+
 const START_OBJECT_TOKEN: JSONToken = { type: "startObject" };
 const END_OBJECT_TOKEN: JSONToken = { type: "endObject" };
 const START_ARRAY_TOKEN: JSONToken = { type: "startArray" };
@@ -48,23 +52,35 @@ export class JSONTokenizer {
     return tokens;
   }
 
-  feedTokens(chunk: string, final = false, onToken: (token: JSONToken) => void): void {
+  feedTokens(
+    chunk: string,
+    final = false,
+    onToken: JSONTokenCallback,
+    onWhitespace?: JSONWhitespaceCallback,
+    onFlush?: JSONFlushCallback,
+  ): void {
     this.buffer += chunk;
 
     while (true) {
+      const whitespaceStart = this.position;
       this.skipWhitespace();
+      if (this.position > whitespaceStart) {
+        onWhitespace?.(whitespaceStart, this.position, this.buffer);
+      }
       if (this.position >= this.buffer.length) {
         break;
       }
 
+      const start = this.position;
       const token = this.readToken(final, this.preserveTokenValues);
       if (!token) {
         break;
       }
-      onToken(token);
+      onToken(token, start, this.position, this.buffer);
     }
 
     if (this.position > 0) {
+      onFlush?.(this.buffer, this.position);
       this.buffer = this.buffer.slice(this.position);
       this.position = 0;
     }
