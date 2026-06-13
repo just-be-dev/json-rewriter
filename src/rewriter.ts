@@ -43,9 +43,18 @@ type ObjectEntry = { key: string; value: JSONValue };
 
 export class JSONRewriter {
   private readonly handlers: HandlerRegistration[] = [];
+  private readonly keyHandlers: HandlerRegistration[] = [];
+  private readonly valueHandlers: HandlerRegistration[] = [];
 
   on(selector: string, handler: JSONHandler): this {
-    this.handlers.push({ selector: compileSelector(selector), handler });
+    const registration = { selector: compileSelector(selector), handler };
+    this.handlers.push(registration);
+    if (handler.key) {
+      this.keyHandlers.push(registration);
+    }
+    if (handler.value || handler.object || handler.array || handler.string || handler.number || handler.boolean || handler.null) {
+      this.valueHandlers.push(registration);
+    }
     return this;
   }
 
@@ -59,28 +68,25 @@ export class JSONRewriter {
 
     const tokenizer = new JSONTokenizer();
     const decoder = new TextDecoder();
-    const encoder = new TextEncoder();
     let processor: StreamingProcessor | undefined;
+    let output: BufferedOutput | undefined;
 
     const stream = response.body.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         start: (controller) => {
-          processor = new StreamingProcessor(this.handlers, (chunk) => {
-            controller.enqueue(encoder.encode(chunk));
-          });
+          output = new BufferedOutput((chunk) => controller.enqueue(chunk));
+          processor = new StreamingProcessor(this.keyHandlers, this.valueHandlers, (chunk) => output?.write(chunk));
         },
         transform(chunk) {
           const text = decoder.decode(chunk, { stream: true });
-          for (const token of tokenizer.feed(text)) {
-            processor?.process(token);
-          }
+          tokenizer.feedTokens(text, false, (token) => processor?.process(token));
+          output?.flushReady();
         },
         flush() {
           const tail = decoder.decode();
-          for (const token of tokenizer.feed(tail, true)) {
-            processor?.process(token);
-          }
+          tokenizer.feedTokens(tail, true, (token) => processor?.process(token));
           processor?.finish();
+          output?.flush();
         },
       }),
     );
@@ -93,13 +99,44 @@ export class JSONRewriter {
   }
 }
 
+class BufferedOutput {
+  private static readonly FLUSH_THRESHOLD = 64 * 1024;
+  private readonly encoder = new TextEncoder();
+  private chunks: string[] = [];
+  private size = 0;
+
+  constructor(private readonly emit: (chunk: Uint8Array) => void) {}
+
+  write(chunk: string): void {
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    this.flushReady();
+  }
+
+  flushReady(): void {
+    if (this.size >= BufferedOutput.FLUSH_THRESHOLD) {
+      this.flush();
+    }
+  }
+
+  flush(): void {
+    if (this.size === 0) {
+      return;
+    }
+    this.emit(this.encoder.encode(this.chunks.join("")));
+    this.chunks = [];
+    this.size = 0;
+  }
+}
+
 class StreamingProcessor {
   private readonly stack: Frame[] = [];
   private rootState: "value" | "done" = "value";
   private skipValidator: SkipValidator | undefined;
 
   constructor(
-    private readonly handlers: readonly HandlerRegistration[],
+    private readonly keyHandlers: readonly HandlerRegistration[],
+    private readonly valueHandlers: readonly HandlerRegistration[],
     private readonly emit: (chunk: string) => void,
   ) {}
 
@@ -156,10 +193,14 @@ class StreamingProcessor {
         throw new SyntaxError("Expected object key");
       }
       const path = [...frame.path, token.value];
-      const key = new KeyNode(path, token.value);
-      this.applyKeyHandlers(path, key);
+      let outputKey = token.value;
+      if (this.keyHandlers.length > 0) {
+        const key = new KeyNode(path, token.value);
+        this.applyKeyHandlers(path, key);
+        outputKey = key.name;
+      }
       frame.pendingKey = token.value;
-      frame.pendingOutputKey = key.name;
+      frame.pendingOutputKey = outputKey;
       frame.state = "colon";
       return;
     }
@@ -225,9 +266,22 @@ class StreamingProcessor {
 
   private processValueToken(token: JSONToken, path: PathSegment[]): void {
     if (token.type === "startObject") {
+      if (this.valueHandlers.length === 0) {
+        this.acceptValueStart(false);
+        this.emit("{");
+        this.stack.push({
+          type: "object",
+          path,
+          state: "keyOrEnd",
+          first: true,
+          appendEntries: [],
+        });
+        return;
+      }
+
       const node = new ContainerNode(path) as JSONObjectNodeImpl;
       this.applyValueHandlers(path, node, "object");
-      this.acceptValueStart(node);
+      this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
         this.skipValidator = new SkipValidator("object");
@@ -255,9 +309,23 @@ class StreamingProcessor {
     }
 
     if (token.type === "startArray") {
+      if (this.valueHandlers.length === 0) {
+        this.acceptValueStart(false);
+        this.emit("[");
+        this.stack.push({
+          type: "array",
+          path,
+          state: "valueOrEnd",
+          first: true,
+          index: 0,
+          appendItems: [],
+        });
+        return;
+      }
+
       const node = new ContainerNode(path) as JSONArrayNodeImpl;
       this.applyValueHandlers(path, node, "array");
-      this.acceptValueStart(node);
+      this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
         this.skipValidator = new SkipValidator("array");
@@ -285,9 +353,15 @@ class StreamingProcessor {
       return;
     }
 
+    if (this.valueHandlers.length === 0) {
+      this.acceptValueStart(false);
+      this.emit(tokenToJSON(token));
+      return;
+    }
+
     const scalar = createScalarNode(token, path);
     this.applyValueHandlers(path, scalar, scalarKind(token));
-    this.acceptValueStart(scalar);
+    this.acceptValueStart(scalar.removed);
     if (scalar.replacement !== undefined) {
       this.emit(scalar.replacement);
       return;
@@ -299,7 +373,7 @@ class StreamingProcessor {
     this.emit(tokenToJSON(token));
   }
 
-  private acceptValueStart(node: MutableNode | ContainerNode): void {
+  private acceptValueStart(removed: boolean): void {
     const parent = this.currentFrame();
     if (!parent) {
       this.rootState = "done";
@@ -311,7 +385,7 @@ class StreamingProcessor {
       if (key === undefined) {
         throw new SyntaxError("Missing object key");
       }
-      if (!node.removed) {
+      if (!removed) {
         if (!parent.first) {
           this.emit(",");
         }
@@ -324,7 +398,7 @@ class StreamingProcessor {
       return;
     }
 
-    if (!node.removed) {
+    if (!removed) {
       if (!parent.first) {
         this.emit(",");
       }
@@ -351,7 +425,7 @@ class StreamingProcessor {
   }
 
   private applyKeyHandlers(path: readonly PathSegment[], node: KeyNode): void {
-    for (const registration of this.handlers) {
+    for (const registration of this.keyHandlers) {
       if (registration.selector.matches(path)) {
         registration.handler.key?.(node);
       }
@@ -359,7 +433,7 @@ class StreamingProcessor {
   }
 
   private applyValueHandlers(path: readonly PathSegment[], node: MutableNode | ContainerNode, kind: ValueKind): void {
-    for (const registration of this.handlers) {
+    for (const registration of this.valueHandlers) {
       if (!registration.selector.matches(path)) {
         continue;
       }
@@ -600,7 +674,7 @@ function scalarKind(token: JSONToken): ValueKind {
 
 function tokenToJSON(token: JSONToken): string {
   if (token.type === "string") {
-    return JSON.stringify(token.value);
+    return token.output;
   }
   if (token.type === "number") {
     return token.raw;

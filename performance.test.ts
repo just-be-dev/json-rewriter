@@ -5,7 +5,7 @@ const CACHE_DIR = ".benchdata";
 const PACKAGE_NAME = "wrangler";
 const CHUNK_SIZE = 64 * 1024;
 const PACKAGE_REGISTRY_ORIGIN = "https://registry.npmjs.org/";
-const MIN_THROUGHPUT_MIB_PER_SECOND = 1;
+const MIN_THROUGHPUT_MIB_PER_SECOND = 20;
 
 interface PerfCase {
   name: string;

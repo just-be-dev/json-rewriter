@@ -5,7 +5,7 @@ export type JSONToken =
   | { type: "endArray" }
   | { type: "colon" }
   | { type: "comma" }
-  | { type: "string"; value: string }
+  | { type: "string"; value: string; output: string }
   | { type: "number"; raw: string; value: number }
   | { type: "boolean"; value: boolean }
   | { type: "null" };
@@ -15,8 +15,15 @@ export class JSONTokenizer {
   private position = 0;
 
   feed(chunk: string, final = false): JSONToken[] {
-    this.buffer += chunk;
     const tokens: JSONToken[] = [];
+    this.feedTokens(chunk, final, (token) => {
+      tokens.push(token);
+    });
+    return tokens;
+  }
+
+  feedTokens(chunk: string, final = false, onToken: (token: JSONToken) => void): void {
+    this.buffer += chunk;
 
     while (true) {
       this.skipWhitespace();
@@ -28,7 +35,7 @@ export class JSONTokenizer {
       if (!token) {
         break;
       }
-      tokens.push(token);
+      onToken(token);
     }
 
     if (this.position > 0) {
@@ -44,8 +51,6 @@ export class JSONTokenizer {
       this.buffer = "";
       this.position = 0;
     }
-
-    return tokens;
   }
 
   private readToken(final: boolean): JSONToken | undefined {
@@ -91,16 +96,23 @@ export class JSONTokenizer {
   private readString(final: boolean): JSONToken | undefined {
     const start = this.position;
     let index = start + 1;
+    let hasEscape = false;
 
     while (index < this.buffer.length) {
       const char = this.buffer[index];
       if (char === '"') {
         const raw = this.buffer.slice(start, index + 1);
         this.position = index + 1;
-        return { type: "string", value: JSON.parse(raw) as string };
+        if (!hasEscape) {
+          return { type: "string", value: this.buffer.slice(start + 1, index), output: raw };
+        }
+
+        const value = JSON.parse(raw) as string;
+        return { type: "string", value, output: JSON.stringify(value) };
       }
 
       if (char === "\\") {
+        hasEscape = true;
         index += 2;
         continue;
       }
