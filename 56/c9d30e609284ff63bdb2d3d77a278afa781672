@@ -1,0 +1,23 @@
+src/tokenizer.ts
+  s_a260bb6535dbcc::t_241da952663c7d 158-167,266-270
+  s_a260bb6535dbcc::t_91b4f4fdd7e1cb 27-28,49
+  s_a260bb6535dbcc::t_75221fa8f19acc 13-25,71,76,80,84,88,92,96,99,105,111,120-124,135-157,168-169,200,204,208,219,232,237-239,265
+index.test.ts
+  s_a260bb6535dbcc::t_65db0accc32b50 201-212
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "56c9d30e609284ff63bdb2d3d77a278afa781672",
+  "prompts": {},
+  "sessions": {
+    "s_a260bb6535dbcc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_13eb5d8c8fferik6KXkrN66GW8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
