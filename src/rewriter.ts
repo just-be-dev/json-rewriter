@@ -30,18 +30,18 @@ type ArrayState = "valueOrEnd" | "value" | "commaOrEnd";
 
 interface ObjectFrame {
   type: "object";
-  path: PathSegment[];
+  // Number of path segments from the root to this container. Member values live
+  // at depth `len + 1`, with their final segment written to pathBuf[len].
+  len: number;
   state: ObjectState;
   first: boolean;
-  pendingKey?: string;
-  pendingPath?: PathSegment[];
   pendingOutputKeyJSON?: string;
   appendEntries: ObjectEntry[];
 }
 
 interface ArrayFrame {
   type: "array";
-  path: PathSegment[];
+  len: number;
   state: ArrayState;
   first: boolean;
   index: number;
@@ -50,7 +50,6 @@ interface ArrayFrame {
 
 type Frame = ObjectFrame | ArrayFrame;
 type ObjectEntry = { key: string; value: JSONValue };
-const EMPTY_PATH: PathSegment[] = [];
 
 export class JSONRewriter {
   private readonly handlers: HandlerRegistration[] = [];
@@ -77,38 +76,30 @@ export class JSONRewriter {
 
     const tokenizer = new JSONTokenizer();
     const decoder = new TextDecoder();
-    const canSkipContainerValues = this.valueHandlers.object.length > 0 || this.valueHandlers.array.length > 0;
     let processor: StreamingProcessor | undefined;
     let output: BufferedOutput | undefined;
+    let processToken: ((token: JSONToken) => void) | undefined;
 
     const stream = response.body.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         start: (controller) => {
           output = new BufferedOutput((chunk) => controller.enqueue(chunk));
-          processor = new StreamingProcessor(this.keyHandlers, this.valueHandlers, (chunk) => output?.write(chunk));
+          // The processor toggles tokenizer.preserveTokenValues directly when it
+          // enters/leaves a skipped subtree, so the hot per-token loop stays a
+          // single call with no extra branch or property write.
+          processor = new StreamingProcessor(this.keyHandlers, this.valueHandlers, (chunk) => output?.write(chunk), (preserve) => {
+            tokenizer.preserveTokenValues = preserve;
+          });
+          processToken = (token) => processor?.process(token);
         },
         transform(chunk) {
           const text = decoder.decode(chunk, { stream: true });
-          if (canSkipContainerValues) {
-            tokenizer.feedTokens(text, false, (token) => {
-              processor?.process(token);
-              tokenizer.preserveTokenValues = processor?.needsTokenValues() ?? true;
-            });
-          } else {
-            tokenizer.feedTokens(text, false, (token) => processor?.process(token));
-          }
+          tokenizer.feedTokens(text, false, processToken!);
           output?.flushReady();
         },
         flush() {
           const tail = decoder.decode();
-          if (canSkipContainerValues) {
-            tokenizer.feedTokens(tail, true, (token) => {
-              processor?.process(token);
-              tokenizer.preserveTokenValues = processor?.needsTokenValues() ?? true;
-            });
-          } else {
-            tokenizer.feedTokens(tail, true, (token) => processor?.process(token));
-          }
+          tokenizer.feedTokens(tail, true, processToken!);
           processor?.finish();
           output?.flush();
         },
@@ -155,6 +146,10 @@ class BufferedOutput {
 
 class StreamingProcessor {
   private readonly stack: Frame[] = [];
+  // Single reused buffer holding the path to the value currently being processed.
+  // Selectors match against (pathBuf, length); we only snapshot a real array when
+  // a handler actually matches, so the common no-match case allocates nothing.
+  private readonly pathBuf: PathSegment[] = [];
   private rootState: "value" | "done" = "value";
   private skipValidator: SkipValidator | undefined;
   private readonly trackPaths: boolean;
@@ -163,6 +158,7 @@ class StreamingProcessor {
     private readonly keyHandlers: readonly HandlerRegistration[],
     private readonly valueHandlers: ValueHandlerGroups,
     private readonly emit: (chunk: string) => void,
+    private readonly setPreserveValues: (preserve: boolean) => void,
   ) {
     this.trackPaths = keyHandlers.length > 0 || hasValueHandlers(valueHandlers);
   }
@@ -171,6 +167,8 @@ class StreamingProcessor {
     if (this.skipValidator) {
       if (this.skipValidator.process(token)) {
         this.skipValidator = undefined;
+        // Skipped subtree fully consumed; resume preserving token values.
+        this.setPreserveValues(true);
       }
       return;
     }
@@ -195,8 +193,10 @@ class StreamingProcessor {
     }
   }
 
-  needsTokenValues(): boolean {
-    return this.skipValidator === undefined;
+  private beginSkip(type: "object" | "array"): void {
+    this.skipValidator = new SkipValidator(type);
+    // No need to materialize values for content we are about to discard.
+    this.setPreserveValues(false);
   }
 
   private processRootToken(token: JSONToken): void {
@@ -208,7 +208,7 @@ class StreamingProcessor {
       throw new SyntaxError("Expected root JSON value");
     }
 
-    this.processValueToken(token, EMPTY_PATH);
+    this.processValueToken(token, 0);
   }
 
   private processObjectToken(frame: ObjectFrame, token: JSONToken): void {
@@ -223,15 +223,18 @@ class StreamingProcessor {
       if (token.type !== "string") {
         throw new SyntaxError("Expected object key");
       }
-      const path = this.trackPaths ? [...frame.path, token.value] : EMPTY_PATH;
       let outputKeyJSON = token.output;
-      if (this.hasMatchingKeyHandler(path)) {
-        const key = new KeyNode(path, token.value);
-        this.applyKeyHandlers(path, key);
-        outputKeyJSON = key.name === token.value ? token.output : JSON.stringify(key.name);
+      if (this.trackPaths) {
+        // The member value lives at depth frame.len + 1 with this key as its
+        // final segment. Writing it now also leaves it in place for the value.
+        const valueLen = frame.len + 1;
+        this.pathBuf[frame.len] = token.value;
+        if (this.keyHandlers.length > 0 && this.hasMatchingKeyHandler(valueLen)) {
+          const key = new KeyNode(this.snapshotPath(valueLen), token.value);
+          this.applyKeyHandlers(valueLen, key);
+          outputKeyJSON = key.name === token.value ? token.output : JSON.stringify(key.name);
+        }
       }
-      frame.pendingKey = token.value;
-      frame.pendingPath = path;
       frame.pendingOutputKeyJSON = outputKeyJSON;
       frame.state = "colon";
       return;
@@ -249,7 +252,7 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected object value");
       }
-      this.processValueToken(token, this.trackPaths ? requirePendingPath(frame) : EMPTY_PATH);
+      this.processValueToken(token, frame.len + 1);
       return;
     }
 
@@ -273,7 +276,10 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected array value");
       }
-      this.processValueToken(token, this.trackPaths ? [...frame.path, frame.index] : EMPTY_PATH);
+      if (this.trackPaths) {
+        this.pathBuf[frame.len] = frame.index;
+      }
+      this.processValueToken(token, frame.len + 1);
       return;
     }
 
@@ -281,7 +287,10 @@ class StreamingProcessor {
       if (!isValueToken(token)) {
         throw new SyntaxError("Expected array value");
       }
-      this.processValueToken(token, this.trackPaths ? [...frame.path, frame.index] : EMPTY_PATH);
+      if (this.trackPaths) {
+        this.pathBuf[frame.len] = frame.index;
+      }
+      this.processValueToken(token, frame.len + 1);
       return;
     }
 
@@ -296,15 +305,15 @@ class StreamingProcessor {
     throw new SyntaxError("Expected , or ] after array value");
   }
 
-  private processValueToken(token: JSONToken, path: PathSegment[]): void {
+  private processValueToken(token: JSONToken, len: number): void {
     if (token.type === "startObject") {
       const handlers = this.valueHandlers.object;
-      if (!this.hasMatchingValueHandler(path, handlers)) {
+      if (!this.hasMatchingValueHandler(len, handlers)) {
         this.acceptValueStart(false);
         this.emit("{");
         this.stack.push({
           type: "object",
-          path,
+          len,
           state: "keyOrEnd",
           first: true,
           appendEntries: [],
@@ -312,24 +321,24 @@ class StreamingProcessor {
         return;
       }
 
-      const node = new ContainerNode(path) as JSONObjectNodeImpl;
-      this.applyValueHandlers(path, node, "object", handlers);
+      const node = new ContainerNode(this.snapshotPath(len)) as JSONObjectNodeImpl;
+      this.applyValueHandlers(len, node, "object", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
-        this.skipValidator = new SkipValidator("object");
+        this.beginSkip("object");
         return;
       }
       if (node.removed) {
-        this.emitRootNullIfNeeded(path);
-        this.skipValidator = new SkipValidator("object");
+        this.emitRootNullIfNeeded(len);
+        this.beginSkip("object");
         return;
       }
 
       this.emit("{");
       const frame: ObjectFrame = {
         type: "object",
-        path,
+        len,
         state: "keyOrEnd",
         first: true,
         appendEntries: node.appendEntries,
@@ -343,12 +352,12 @@ class StreamingProcessor {
 
     if (token.type === "startArray") {
       const handlers = this.valueHandlers.array;
-      if (!this.hasMatchingValueHandler(path, handlers)) {
+      if (!this.hasMatchingValueHandler(len, handlers)) {
         this.acceptValueStart(false);
         this.emit("[");
         this.stack.push({
           type: "array",
-          path,
+          len,
           state: "valueOrEnd",
           first: true,
           index: 0,
@@ -357,24 +366,24 @@ class StreamingProcessor {
         return;
       }
 
-      const node = new ContainerNode(path) as JSONArrayNodeImpl;
-      this.applyValueHandlers(path, node, "array", handlers);
+      const node = new ContainerNode(this.snapshotPath(len)) as JSONArrayNodeImpl;
+      this.applyValueHandlers(len, node, "array", handlers);
       this.acceptValueStart(node.removed);
       if (node.replacement !== undefined) {
         this.emit(node.replacement);
-        this.skipValidator = new SkipValidator("array");
+        this.beginSkip("array");
         return;
       }
       if (node.removed) {
-        this.emitRootNullIfNeeded(path);
-        this.skipValidator = new SkipValidator("array");
+        this.emitRootNullIfNeeded(len);
+        this.beginSkip("array");
         return;
       }
 
       this.emit("[");
       const frame: ArrayFrame = {
         type: "array",
-        path,
+        len,
         state: "valueOrEnd",
         first: true,
         index: 0,
@@ -389,24 +398,28 @@ class StreamingProcessor {
 
     const kind = scalarKind(token);
     const handlers = this.valueHandlers[kind];
-    if (!this.hasMatchingValueHandler(path, handlers)) {
+    if (!this.hasMatchingValueHandler(len, handlers)) {
       this.acceptValueStart(false);
       this.emit(tokenToJSON(token));
       return;
     }
 
-    const scalar = createScalarNode(token, path);
-    this.applyValueHandlers(path, scalar, kind, handlers);
+    const scalar = createScalarNode(token, this.snapshotPath(len));
+    this.applyValueHandlers(len, scalar, kind, handlers);
     this.acceptValueStart(scalar.removed);
     if (scalar.replacement !== undefined) {
       this.emit(scalar.replacement);
       return;
     }
     if (scalar.removed) {
-      this.emitRootNullIfNeeded(path);
+      this.emitRootNullIfNeeded(len);
       return;
     }
     this.emit(tokenToJSON(token));
+  }
+
+  private snapshotPath(len: number): PathSegment[] {
+    return this.pathBuf.slice(0, len);
   }
 
   private acceptValueStart(removed: boolean): void {
@@ -428,8 +441,6 @@ class StreamingProcessor {
         this.emit(`${keyJSON}:`);
         parent.first = false;
       }
-      parent.pendingKey = undefined;
-      parent.pendingPath = undefined;
       parent.pendingOutputKeyJSON = undefined;
       parent.state = "commaOrEnd";
       return;
@@ -461,35 +472,35 @@ class StreamingProcessor {
     this.stack.pop();
   }
 
-  private applyKeyHandlers(path: readonly PathSegment[], node: KeyNode): void {
+  private applyKeyHandlers(len: number, node: KeyNode): void {
     for (const registration of this.keyHandlers) {
-      if (registration.selector.matches(path)) {
+      if (registration.selector.matches(this.pathBuf, len)) {
         registration.handler.key?.(node);
       }
     }
   }
 
-  private hasMatchingKeyHandler(path: readonly PathSegment[]): boolean {
+  private hasMatchingKeyHandler(len: number): boolean {
     for (const registration of this.keyHandlers) {
-      if (registration.selector.matches(path)) {
+      if (registration.selector.matches(this.pathBuf, len)) {
         return true;
       }
     }
     return false;
   }
 
-  private hasMatchingValueHandler(path: readonly PathSegment[], handlers: readonly HandlerRegistration[]): boolean {
+  private hasMatchingValueHandler(len: number, handlers: readonly HandlerRegistration[]): boolean {
     for (const registration of handlers) {
-      if (registration.selector.matches(path)) {
+      if (registration.selector.matches(this.pathBuf, len)) {
         return true;
       }
     }
     return false;
   }
 
-  private applyValueHandlers(path: readonly PathSegment[], node: MutableNode | ContainerNode, kind: ValueKind, handlers: readonly HandlerRegistration[]): void {
+  private applyValueHandlers(len: number, node: MutableNode | ContainerNode, kind: ValueKind, handlers: readonly HandlerRegistration[]): void {
     for (const registration of handlers) {
-      if (!registration.selector.matches(path)) {
+      if (!registration.selector.matches(this.pathBuf, len)) {
         continue;
       }
       registration.handler.value?.(node);
@@ -509,8 +520,8 @@ class StreamingProcessor {
     }
   }
 
-  private emitRootNullIfNeeded(path: readonly PathSegment[]): void {
-    if (path.length === 0) {
+  private emitRootNullIfNeeded(len: number): void {
+    if (len === 0) {
       this.emit("null");
     }
   }
@@ -819,11 +830,4 @@ function stringifyJSONValue(value: JSONValue): string {
     throw new TypeError("Replacement value must be valid JSON");
   }
   return json;
-}
-
-function requirePendingPath(frame: ObjectFrame): PathSegment[] {
-  if (frame.pendingPath === undefined) {
-    throw new SyntaxError("Missing object key");
-  }
-  return frame.pendingPath;
 }
