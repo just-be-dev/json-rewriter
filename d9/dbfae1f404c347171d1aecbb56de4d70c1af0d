@@ -1,0 +1,20 @@
+src/rewriter.ts
+  s_f2d0431cf96bac::t_5ab113a1d950e7 79,81-83,89-101,105,110,155-159,164-219,228,233,237,240,242,253,258,262-274,289,298,301,307,326,335,344,349,354,360,363,372,383,388,393,399,418,424,436-438,440,465,471,484-486,488,505,510,533,535,545,553-556,558,563-566,568,623,627-629
+  s_f2d0431cf96bac::t_a9cb5e7f231476 160-163,630
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "d9dbfae1f404c347171d1aecbb56de4d70c1af0d",
+  "prompts": {},
+  "sessions": {
+    "s_f2d0431cf96bac": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_13e8cd48bffeyN6yf92nDg6oPy",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
