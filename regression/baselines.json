@@ -1,0 +1,16 @@
+{
+  "document": "wrangler",
+  "documentBytes": 29426608,
+  "performance": {
+    "remove integrity fields": 0.347,
+    "rewrite tarball urls": 0.346,
+    "remove versions subtree": 0.657,
+    "combined mutations": 0.337
+  },
+  "memory": {
+    "remove integrity fields": 1.003,
+    "rewrite tarball urls": 1.009,
+    "remove versions subtree": 0.007,
+    "combined mutations": 0.992
+  }
+}

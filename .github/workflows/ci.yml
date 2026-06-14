@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Cache packument fixtures
+        uses: actions/cache@v5
+        with:
+          path: .benchdata
+          key: benchdata-${{ runner.os }}
+
+      - run: mise run typecheck
+      - run: mise run test
+
+  regression:
+    name: Performance & memory regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: jdx/mise-action@v4
+        with:
+          experimental: true
+
+      - name: Cache packument fixtures
+        uses: actions/cache@v5
+        with:
+          path: .benchdata
+          key: benchdata-${{ runner.os }}
+
+      # More iterations on shared CI runners than the local default, so the
+      # median shrugs off scheduler noise. Thresholds are machine-independent
+      # ratios, so the slower runner does not cause false failures.
+      - name: Regression gate
+        run: mise run regression
+        env:
+          REGRESSION_ITERATIONS: "11"
+          REGRESSION_WARMUP: "3"

@@ -3,12 +3,6 @@
   "module": "index.ts",
   "type": "module",
   "license": "MIT",
-  "scripts": {
-    "bench": "bun benchmarks/bench.ts",
-    "perf": "PERF=1 bun test performance.test.ts",
-    "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
-  },
   "devDependencies": {
     "@types/bun": "latest"
   },
