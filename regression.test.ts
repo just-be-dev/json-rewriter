@@ -34,6 +34,13 @@ const WARMUP = readIntEnv("REGRESSION_WARMUP", 2, 0);
 // (something got meaningfully slower or started buffering), not chasing noise.
 const PERF_TOLERANCE = readRatioEnv("REGRESSION_PERF_TOLERANCE", 0.35);
 const MEMORY_TOLERANCE = readRatioEnv("REGRESSION_MEMORY_TOLERANCE", 0.5);
+// Streaming-drop cases (e.g. removing a whole subtree) peak at a few hundred KiB
+// of fixed-size internal buffers that do not scale with the document and vary by
+// platform, so a relative tolerance on that tiny ratio is pure noise. The real
+// regression for those cases is buffering the dropped subtree, which pushes the
+// ratio toward 1.0. This minimum ceiling absorbs the small-scale noise while
+// still catching a jump toward whole-document buffering.
+const MEMORY_MIN_CEILING = readRatioEnv("REGRESSION_MEMORY_MIN_CEILING", 0.25);
 const UPDATE_BASELINES = Bun.env.UPDATE_BASELINES === "1";
 
 interface Scenario {
@@ -186,7 +193,7 @@ describe("performance and memory regression", () => {
         const baseline = baselines.memory[name];
         expect(baseline, `missing memory baseline for "${name}" — run UPDATE_BASELINES=1`).toBeDefined();
 
-        const ceiling = (baseline as number) * (1 + MEMORY_TOLERANCE);
+        const ceiling = Math.max((baseline as number) * (1 + MEMORY_TOLERANCE), MEMORY_MIN_CEILING);
         expect(
           actual,
           `"${name}" peak external/doc ratio ${actual.toFixed(3)} regressed above ${ceiling.toFixed(3)} ` +

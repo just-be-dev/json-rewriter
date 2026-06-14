@@ -172,7 +172,7 @@ When you intentionally change performance characteristics, regenerate and commit
 mise run update-baselines
 ```
 
-Tune it with `REGRESSION_ITERATIONS`, `REGRESSION_WARMUP`, `REGRESSION_PERF_TOLERANCE` (default `0.35`), and `REGRESSION_MEMORY_TOLERANCE` (default `0.5`).
+Tune it with `REGRESSION_ITERATIONS`, `REGRESSION_WARMUP`, `REGRESSION_PERF_TOLERANCE` (default `0.35`), `REGRESSION_MEMORY_TOLERANCE` (default `0.5`), and `REGRESSION_MEMORY_MIN_CEILING` (default `0.25`). The last sets a floor under the memory ceiling so streaming-drop cases — whose peak memory is a tiny, platform-dependent constant rather than a fraction of the document — are only flagged if they approach whole-document buffering.
 
 ## Benchmark
 
