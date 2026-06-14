@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_b8ddeeba145da7::t_7fe4800309fbf8 17,19,24,36,38,43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "8feba0524ea2640089edc2fe43c02c0a9daaf876",
+  "prompts": {},
+  "sessions": {
+    "s_b8ddeeba145da7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a99db940-8e16-4294-9f47-86c128ebcdaf",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
