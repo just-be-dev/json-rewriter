@@ -1,0 +1,21 @@
+performance.test.ts
+  s_a1864ab9b51e2e::t_61d15c9589e614 24
+memory.test.ts
+  s_a1864ab9b51e2e::t_61d15c9589e614 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1a3b70b1367a304902322aee8033d369dfa1ca6d",
+  "prompts": {},
+  "sessions": {
+    "s_a1864ab9b51e2e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_13dc18831ffeiwlc7j221c7j48",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
