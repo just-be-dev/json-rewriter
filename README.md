@@ -132,29 +132,62 @@ Subtree removal and replacement skip the incoming subtree token stream instead o
 ## Test
 
 ```bash
-bun test
+mise run test
 ```
 
-Performance tests are opt-in because they process a large npm packument and have timing-sensitive assertions:
+Run just the large-document performance test:
 
 ```bash
-bun run perf
+mise run perf
 ```
+
+Memory profiling tests run as part of `mise run test`. They stream the same large document through representative rewrites, drain the output without buffering it, and report peak RSS, heap, external memory, ArrayBuffer memory, and retained RSS after GC. Run them on their own with:
+
+```bash
+mise run memory
+```
+
+You can make the memory profile fail when peak RSS growth exceeds a budget:
+
+```bash
+MEMORY_MAX_RSS_DELTA_MB=128 mise run memory
+```
+
+## Regression gate
+
+CI runs a regression gate that fails when a change makes the rewriter meaningfully slower or starts buffering memory it used to stream:
+
+```bash
+mise run regression
+```
+
+It samples every scenario over many iterations and compares the medians against committed baselines in `regression/baselines.json`. To stay portable across machines (a CI runner is several times slower than a dev laptop), it never asserts on raw numbers — only on machine-independent ratios:
+
+- **Performance** — each mutation case's throughput as a fraction of the pass-through rewrite measured in the same iteration. Pass-through runs the full tokenizer and serializer with no mutation work, so it tracks CPU speed and cancels out of the ratio.
+- **Memory** — peak external memory as a fraction of the document size. Streaming keeps this near 1× (the live input); a regression that buffers the whole output pushes it toward 2×. Pass-through memory is reported but not gated — it is a reference point, not a cost we ship.
+
+When you intentionally change performance characteristics, regenerate and commit the baselines:
+
+```bash
+mise run update-baselines
+```
+
+Tune it with `REGRESSION_ITERATIONS`, `REGRESSION_WARMUP`, `REGRESSION_PERF_TOLERANCE` (default `0.35`), and `REGRESSION_MEMORY_TOLERANCE` (default `0.5`).
 
 ## Benchmark
 
 ```bash
-bun run bench
+mise run bench
 ```
 
-The performance test and benchmark download the `wrangler` npm packument on first run, cache it in `.benchdata`, and measure streaming rewrite throughput for pass-through and representative mutations. The benchmark reports mean, p50, p95, min, max, throughput, and output size. You can tune it with `--iterations`, `--warmup`, and `--chunk-size`:
+The performance test, memory profile, and benchmark download the `wrangler` npm packument on first run, cache it in `.benchdata`, and measure streaming rewrite behavior for pass-through and representative mutations. The benchmark reports mean, p50, p95, min, max, throughput, and output size. You can tune it with `--iterations`, `--warmup`, and `--chunk-size`:
 
 ```bash
-bun run bench -- --iterations 25 --warmup 5 --chunk-size 32768
+mise run bench -- --iterations 25 --warmup 5 --chunk-size 32768
 ```
 
 ## Typecheck
 
 ```bash
-bun run typecheck
+mise run typecheck
 ```
