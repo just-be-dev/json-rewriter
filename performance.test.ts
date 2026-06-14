@@ -20,10 +20,8 @@ interface PerfResult {
   outputBytes: number;
 }
 
-const perfTest = Bun.env.PERF === "1" ? test : test.skip;
-
 describe("large document performance", () => {
-  perfTest(
+  test(
     "rewrites the wrangler npm packument quickly enough",
     async () => {
       const input = await loadPackument(PACKAGE_NAME);
