@@ -1,0 +1,34 @@
+mise.toml
+  s_b8ddeeba145da7::t_4b0573ea0bad87 3-32
+  s_b8ddeeba145da7::t_78279b9a898250 1-2
+  s_b8ddeeba145da7::t_09f1fc46850b3b 33-40
+README.md
+  s_b8ddeeba145da7::t_e9a8f96a705323 135,141,144-153,180
+  s_b8ddeeba145da7::t_6aab4f69c4f75a 156-176
+  s_b8ddeeba145da7::t_75c540ad9c1025 186,192
+  s_a1864ab9b51e2e::t_61d15c9589e614 138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "8a93c845602c4e7db4f92fa93691a7169b936934",
+  "prompts": {},
+  "sessions": {
+    "s_a1864ab9b51e2e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_13dc18831ffeiwlc7j221c7j48",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    },
+    "s_b8ddeeba145da7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a99db940-8e16-4294-9f47-86c128ebcdaf",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
