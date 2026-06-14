@@ -1,0 +1,22 @@
+regression.test.ts
+  s_b8ddeeba145da7::t_d2395706868283 37-43
+  s_b8ddeeba145da7::t_7aa9917524e23f 196
+README.md
+  s_b8ddeeba145da7::t_0de93178e15ab7 175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "1bb4fe2aa417e4c3f10dc425fd82c7a8af0af01f",
+  "prompts": {},
+  "sessions": {
+    "s_b8ddeeba145da7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a99db940-8e16-4294-9f47-86c128ebcdaf",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Justin Bennett <git@just-be.dev>"
+    }
+  }
+}
