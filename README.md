@@ -7,7 +7,7 @@ It processes one JSON document as a stream and emits minified JSON. It does not 
 ## Install
 
 ```bash
-bun install
+mise install
 ```
 
 ## Example
